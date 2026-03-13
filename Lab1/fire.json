@@ -1,0 +1,6 @@
+{
+  "bucket_name": "<>",
+  "concurrency_limit": 1,
+  "counter_name": "active_locks.json",
+  "lock_timeout_minutes": 15
+}
