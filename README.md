@@ -17,13 +17,15 @@ Simply paste this prompt into Cursor to automate the entire workflow:
 Step 1: Split the serverless configuration for Skill-Driven-Serverless-Split/Lab1
 - Apply the split-serverless skill to Lab1/serverless.yml
 - Create infrastructure/ folder with main serverless.yml, lambda/serverless.yml, and step-functions/serverless.yml
-- Wait for this to complete before proceeding
+- Verify the new infrastructure/ structure is complete and all configurations are correctly split
+- Delete the original Lab1/serverless.yml file (since it's now replaced by the modular structure)
+- Confirm deletion is complete before proceeding
 
 Step 2: After split is complete, launch two subagents in parallel:
 
 Subagent A (/unit-test-writer): Create comprehensive unit tests for all handlers in Lab1/handlers/. Write tests with mocking, run pytest with coverage, and report results.
 
-Subagent B (/documentation-writer): Document the Lab1 project including the new infrastructure/ layout. Update README with project overview, architecture, setup instructions, and deployment steps.
+Subagent B (/documentation-writer): Document the Lab1 project including the new infrastructure/ layout. Update README with project overview, architecture, setup instructions, deployment steps (from infrastructure/ directory), and note the migration from monolithic to modular serverless config.
 
 Execute step 1 first, then step 2 in parallel.
 ```
