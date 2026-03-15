@@ -1,63 +1,57 @@
-# S3 Step Function Lock Processor
+## Lab 1 – S3 Step Function Lock Processor
 
-A generic distributed workflow lock processor that implements pessimistic locking using AWS S3 and Step Functions. This solution ensures only one process can run at any given time by using S3 as a distributed lock mechanism, with built-in stale lock detection and timeout management.
+### Overview
 
-<img width="330" height="356" alt="S3 Step Function Lock Processor Architecture" src="https://github.com/user-attachments/assets/a1520b31-69f1-4524-a779-3ec4fc41779a" />
+This lab walks you through building a **distributed lock processor** using **AWS Step Functions**, **AWS Lambda (Python)**, and **Amazon S3**.  
+The goal is to enforce **pessimistic locking** around a “worker” job so that only a safe number of concurrent workflows can run at once, while automatically cleaning up **stale locks** that exceed a configurable timeout.
 
-## 🔧 Features
+At the end of the lab you will:
 
-- **Pessimistic Locking**: Ensures mutual exclusion using S3-based distributed locks
-- **Stale Lock Detection**: Automatically detects and handles stale locks from aborted Step Function executions
-- **Configurable Timeout**: Customizable lock timeout to prevent indefinite locking
-- **Concurrency Control**: Configurable concurrency limits for controlled parallel execution
-- **Serverless Architecture**: Built with AWS Lambda and Step Functions for scalability
-- **Lock Counter Management**: Tracks active locks using JSON-based counters
+- Understand how to model a locking workflow in Step Functions.
+- Use S3 objects as lock records and a simple JSON counter to track active locks.
+- Implement Lambda handlers that **check**, **acquire**, and **release** locks safely.
 
-## 🏗️ Architecture
+---
 
-The lock processor uses the following components:
+### High‑Level Architecture
 
-1. **S3 Bucket**: Acts as the distributed lock store
-2. **Step Functions**: Orchestrates the locking workflow
-3. **Lambda Functions**: Handles lock acquisition, release, and validation
-4. **Lock Files**: JSON-based lock files stored in S3
-5. **Counter Files**: Track active lock counts
+- **Step Functions state machine (`s3LockedProcessorWorkflow`)**
+  - Orchestrates the locking lifecycle.
+  - States:
+    - `CheckIfLockExists` → Lambda `checkIfLockExists`
+    - `CanAcquireLock` → choice on `canAcquireLock`
+    - `AcquireLock` → Lambda `acquireLock`
+    - `SubmitEMRStep` / `SimulateWorker` (placeholder “work”)
+    - `ReleaseLock` → Lambda `releaseLock`
+    - `LockFailed` (Fail state if lock cannot be acquired)
 
-## 🚀 Quick Start
+- **Lambda functions (Python, in `handlers/`)**
+  - `check_lock.py` (`checkIfLockExists`):
+    - Lists current S3 lock objects under `locks/`.
+    - Removes **stale** locks based on `lock_timeout_minutes`.
+    - Maintains an `active_locks.json` counter and decides if a new lock can be acquired (`canAcquireLock`).
+  - `acquire_lock.py` (`acquireLock`):
+    - Creates a new lock object in S3 with a unique `lockId` and timestamp.
+    - Increments the `active_locks.json` counter.
+  - `release_lock.py` (`releaseLock`):
+    - Deletes the lock object.
+    - Decrements the `active_locks.json` counter.
 
-### Prerequisites
+- **S3 bucket (`custom.bucketName` in `serverless.yml`)**
+  - Stores:
+    - `locks/<uuid>` JSON documents representing active locks.
+    - `active_locks.json` containing a simple `{"count": <int>}` counter.
 
-- AWS CLI configured with appropriate permissions
-- Node.js 14.x or higher
-- Serverless Framework installed
+- **IAM role**
+  - Grants Lambdas permission to read/write/delete S3 lock objects and to interact with EMR/Step Functions as needed.
 
-### Installation
+This lab uses a **Serverless Framework** service defined in `serverless.yml` (`service: s3-locked-processor`) and deploys to AWS as a fully managed, event‑driven workflow.
 
-```bash
-# Clone the repository
-git clone https://github.com/soumilshah1995/s3-step-fn-lock-processor.git
-cd s3-step-fn-lock-processor
+---
 
-# Install dependencies
-npm install
+### Input Contract and Lock Behaviour
 
-# Install serverless step functions plugin
-npm install --save-dev serverless-step-functions
-```
-
-### Deployment
-
-```bash
-# Deploy the stack
-sls deploy
-
-# Deploy to specific stage
-sls deploy --stage prod
-```
-
-## 📋 Usage
-
-### Sample Execution Payload
+Step Function executions expect an input payload similar to:
 
 ```json
 {
@@ -68,225 +62,161 @@ sls deploy --stage prod
 }
 ```
 
-### Parameters
+- **`bucket_name`**: S3 bucket where locks and the counter file live (must exist before running the lab).
+- **`concurrency_limit`**: Maximum allowed concurrent locks; if `active_locks >= concurrency_limit`, the workflow fails with `LockAcquisitionFailed`.
+- **`counter_name`**: Name of the JSON file that tracks the number of active locks.
+- **`lock_timeout_minutes`**: Threshold after which an existing lock is treated as **stale** and removed during the `check_lock` step.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `bucket_name` | String | Yes | S3 bucket name for storing lock files |
-| `concurrency_limit` | Integer | Yes | Maximum number of concurrent processes allowed |
-| `counter_name` | String | Yes | Name of the lock counter file (e.g., "active_locks.json") |
-| `lock_timeout_minutes` | Integer | Yes | Lock timeout duration in minutes |
+Lock lifecycle:
 
-### Example Usage
+1. **Check** – `check_lock` removes stale locks and updates `active_locks.json`.
+2. **Decision** – If `currentLocks < concurrency_limit`, `canAcquireLock = true`.
+3. **Acquire** – `acquire_lock` creates a new lock object and increments the counter.
+4. **Work** – A simulated worker step runs (placeholder for EMR or other workloads).
+5. **Release** – `release_lock` deletes the lock and decrements the counter.
 
-```python
-import boto3
-import json
+---
 
-# Initialize Step Functions client
-stepfunctions = boto3.client('stepfunctions')
+### Local Setup
 
-# Define the execution payload
-payload = {
-    "bucket_name": "my-distributed-locks",
-    "concurrency_limit": 1,
-    "counter_name": "workflow_locks.json",
-    "lock_timeout_minutes": 30
-}
+#### Prerequisites
 
-# Start execution
-response = stepfunctions.start_execution(
-    stateMachineArn='arn:aws:states:region:account:stateMachine:LockProcessor',
-    input=json.dumps(payload)
-)
+- **AWS account** with permissions to deploy Lambda, Step Functions, and S3.
+- **AWS CLI** configured (`aws configure`) for the target account/region.
+- **Node.js 14.x or higher** (for the Serverless Framework CLI).
+- **npm** (bundled with Node.js).
+- **Python 3.9** (matches `runtime: python3.9` in `serverless.yml`).
+
+#### Install the Serverless Framework and plugins
+
+From the docs worktree root:
+
+```bash
+cd Lab1
+
+# Install the Serverless Framework CLI (if not already installed)
+npm install -g serverless
+
+# Install local dependencies (primarily plugins such as serverless-step-functions)
+npm install
 ```
 
-## 🔒 Lock Mechanism
+> The `serverless.yml` in this lab already references the `serverless-step-functions` plugin via the `plugins` section.
 
-### How It Works
+#### Python dependencies
 
-1. **Lock Acquisition**: Process attempts to create a lock file in S3
-2. **Concurrency Check**: Validates against the configured concurrency limit
-3. **Lock Validation**: Checks for existing locks and their timestamps
-4. **Stale Lock Detection**: Identifies and removes expired locks
-5. **Process Execution**: Runs the protected workflow
-6. **Lock Release**: Removes the lock file upon completion or timeout
+The Lambda handlers in `handlers/` use only the **AWS SDK for Python (`boto3`)** and the Python standard library:
 
-### Lock File Structure
+- On AWS, `boto3` is available in the managed Lambda runtime.
+- If you want to run or unit‑test locally, create and activate a virtual environment and install dependencies:
 
-```json
-{
-  "lock_id": "unique-lock-identifier",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "process_id": "step-function-execution-arn",
-  "timeout_minutes": 15,
-  "status": "active"
-}
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install boto3
 ```
 
-### Counter File Structure
+---
 
-```json
-{
-  "active_locks": 1,
-  "max_concurrency": 1,
-  "last_updated": "2024-01-15T10:30:00Z",
-  "locks": [
-    {
-      "lock_id": "unique-lock-identifier",
-      "created_at": "2024-01-15T10:30:00Z"
-    }
-  ]
-}
-```
+### Deployment
 
-## 🛡️ Stale Lock Handling
+All deployment is driven by the **Serverless Framework** configuration in `Lab1/serverless.yml`.
 
-The system automatically handles stale locks through:
+#### 1. Prepare the S3 bucket
 
-- **Timeout Detection**: Locks exceeding the configured timeout are marked as stale
-- **Cleanup Process**: Stale locks are automatically removed during lock acquisition attempts
-- **Health Checks**: Periodic validation of active locks against running Step Function executions
-
-### Stale Lock Scenarios
-
-- Step Function execution is aborted or fails
-- Lambda function timeout or error
-- Manual termination of processes
-- AWS service interruptions
-
-## ⚙️ Configuration
-
-### Environment Variables
+In `serverless.yml`, the bucket is configured as:
 
 ```yaml
-# serverless.yml
-environment:
-  LOCK_BUCKET: ${self:custom.lockBucket}
-  DEFAULT_TIMEOUT: 15
-  MAX_RETRIES: 3
-  CLEANUP_INTERVAL: 300
-```
-
-### Custom Configuration
-
-```yaml
-# serverless.yml
 custom:
-  lockBucket: my-distributed-locks-${self:provider.stage}
-  concurrencyLimits:
-    dev: 2
-    prod: 1
-  timeoutMinutes:
-    dev: 10
-    prod: 30
+  bucketName: soumil-dev-bucket-1995
 ```
 
-## 🔍 Monitoring and Logging
+- Create this bucket (or adjust the name and create your own):
 
-### CloudWatch Metrics
-
-- Lock acquisition success/failure rates
-- Lock timeout occurrences
-- Stale lock cleanup events
-- Concurrency violations
-
-### Log Groups
-
-- `/aws/lambda/lock-processor-acquire`
-- `/aws/lambda/lock-processor-release`
-- `/aws/lambda/lock-processor-cleanup`
-- `/aws/stepfunctions/lock-processor-workflow`
-
-### Sample CloudWatch Query
-
-```sql
-fields @timestamp, @message
-| filter @message like /LOCK_ACQUIRED/
-| stats count() by bin(5m)
+```bash
+aws s3 mb s3://soumil-dev-bucket-1995 --region us-east-1
 ```
 
-## 🚨 Error Handling
+#### 2. Deploy the stack
 
-### Common Error Scenarios
+From `Lab1/`:
 
-| Error | Description | Resolution |
-|-------|-------------|------------|
-| `LockAcquisitionFailed` | Unable to acquire lock due to concurrency limit | Retry with exponential backoff |
-| `StaleLockDetected` | Found expired locks during acquisition | Automatic cleanup triggered |
-| `S3AccessDenied` | Insufficient permissions for S3 operations | Verify IAM permissions |
-| `LockTimeoutExceeded` | Lock held longer than configured timeout | Automatic lock release |
+```bash
+# Deploy to the default stage (usually "dev")
+sls deploy
 
-### Retry Strategy
+# Or deploy explicitly to a stage
+sls deploy --stage dev
+sls deploy --stage prod
+```
+
+Deployment creates:
+
+- The three Lambda functions (`checkIfLockExists`, `acquireLock`, `releaseLock`).
+- The Step Functions state machine (`s3-locked-processor-workflow`).
+- IAM roles and permissions defined in `serverless.yml`.
+
+---
+
+### Running the Workflow
+
+After deployment:
+
+1. Open the **AWS Step Functions** console.
+2. Locate the state machine named **`s3-locked-processor-workflow`**.
+3. Choose **Start execution** and provide an input payload:
 
 ```json
 {
-  "Retry": [
-    {
-      "ErrorEquals": ["LockAcquisitionFailed"],
-      "IntervalSeconds": 2,
-      "MaxAttempts": 3,
-      "BackoffRate": 2.0
-    }
-  ]
+  "bucket_name": "soumil-dev-bucket-1995",
+  "concurrency_limit": 1,
+  "counter_name": "active_locks.json",
+  "lock_timeout_minutes": 15
 }
 ```
 
-## 🔐 Security Considerations
+4. Start multiple executions to observe how:
+   - Only up to `concurrency_limit` executions are allowed concurrently.
+   - Stale locks are removed once `lock_timeout_minutes` is exceeded.
 
-### IAM Permissions
+You can inspect the S3 bucket to see:
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject",
-        "s3:ListBucket"
-      ],
-      "Resource": [
-        "arn:aws:s3:::my-lock-bucket/*",
-        "arn:aws:s3:::my-lock-bucket"
-      ]
-    }
-  ]
-}
-```
+- Lock objects under `locks/`.
+- The `active_locks.json` counter being incremented/decremented.
 
-### Best Practices
+---
 
-- Use dedicated S3 bucket for locks
-- Enable S3 versioning for lock files
-- Implement S3 bucket encryption
-- Set up S3 lifecycle policies for cleanup
-- Monitor S3 access patterns
+### Testing and Validation
 
-## 🧪 Testing
+This lab does not include a dedicated automated test suite, but you can validate behaviour using:
 
-### Unit Tests
+- **Step Functions execution history**:
+  - Confirm transitions through `CheckIfLockExists`, `AcquireLock`, and `ReleaseLock`.
+  - Observe failures to `LockFailed` when `concurrency_limit` is exceeded.
+- **CloudWatch Logs**:
+  - Each Lambda logs messages (e.g., “Incremented active locks”, “Stale lock detected”).
+- **S3 inspection**:
+  - Verify creation, expiration, and deletion of `locks/*` objects.
+  - Verify that `active_locks.json` count matches expectations.
 
-```bash
-npm test
-```
+If you want more formal tests, you can:
 
-### Integration Tests
+- Write unit tests for the handlers in `handlers/` using `pytest` and mocked `boto3` clients.
+- Use Step Functions local or integration tests to simulate concurrent executions.
 
-```bash
-npm run test:integration
-```
+---
 
-### Load Testing
+### Operational and Security Notes
 
-```bash
-# Test concurrent lock acquisition
-npm run test:load
-```
+- **IAM permissions** (from `serverless.yml`):
+  - Lambdas can `GetObject`, `PutObject`, `DeleteObject`, and `ListBucket` on the configured lock bucket.
+  - Additional permissions allow EMR and Step Functions interactions if you extend the lab.
+- **Best practices** when turning this lab into production code:
+  - Use a dedicated S3 bucket for locks and enable encryption and versioning.
+  - Apply lifecycle policies to clean up old lock files.
+  - Add alarms/metrics on:
+    - Lock acquisition failures.
+    - Stale lock cleanup events.
+    - Concurrency limit violations.
 
-## 📊 Performance Considerations
-
-- **S3 Consistency**: Utilizes S3 strong consistency for reliable locking
-- **Lock Granularity**: Fine-g
+This lab README is intentionally concise and focused on **what the lab is**, **how it is wired**, and **how to deploy and exercise the workflow**. For deeper exploration, inspect `serverless.yml` and the Lambda handlers in `handlers/`.
